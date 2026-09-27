@@ -3,7 +3,7 @@ services:
     build:
       context: ./channel-monitor
       dockerfile: Dockerfile
-    image: calciumion/new-api-channel-monitor:latest
+    image: <docker-hub-user>/new-api-channel-monitor:latest
     container_name: new-api-channel-monitor
     restart: always
     # 通过 .env 注入敏感配置（.env 已在 .gitignore 中排除）

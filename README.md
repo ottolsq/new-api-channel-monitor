@@ -4,7 +4,7 @@
 
 [![Go Version](https://img.shields.io/badge/go-1.22+-blue.svg)](https://golang.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
-[![Docker Image](https://img.shields.io/badge/docker-calciumion%2Fnew--api--channel--monitor-blue)](https://hub.docker.com/r/calciumion/new-api-channel-monitor)
+[![Docker Image](https://img.shields.io/badge/docker-%3Cdocker--hub--user%3E%2Fnew--api--channel--monitor-blue)](https://hub.docker.com/r/<docker-hub-user>/new-api-channel-monitor)
 
 ## 它在做什么
 
@@ -48,7 +48,7 @@ tar -xzf channel-monitor_linux_amd64.tar.gz
 ### 方式二：拉 Docker 镜像
 
 ```bash
-docker pull calciumion/new-api-channel-monitor:latest
+docker pull <docker-hub-user>/new-api-channel-monitor:latest
 ```
 
 ### 方式三：从源码编译
@@ -202,7 +202,7 @@ docker exec new-api-channel-monitor /app/channel-monitor -query 24 -failures
 docker run -d --name new-api-channel-monitor \
   --env-file .env \
   -v channel-monitor-data:/app/data \
-  calciumion/new-api-channel-monitor:latest
+  <docker-hub-user>/new-api-channel-monitor:latest
 ```
 
 ### systemd
