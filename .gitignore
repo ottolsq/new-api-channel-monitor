@@ -1,0 +1,38 @@
+# 编译产物
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go 编译临时文件
+/cmd/*/*.exe
+/coverage.out
+/coverage.html
+
+# 运行时数据库
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 配置敏感文件（保留 .example 作为模板）
+.env
+config.json
+config.local.json
+*.secret
+
+# 日志
+*.log
+logs/
+nohup.out
+
+# 系统/IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo

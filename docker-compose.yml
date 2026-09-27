@@ -1,0 +1,28 @@
+services:
+  channel-monitor:
+    build:
+      context: ./channel-monitor
+      dockerfile: Dockerfile
+    image: calciumion/new-api-channel-monitor:latest
+    container_name: new-api-channel-monitor
+    restart: always
+    # 通过 .env 注入敏感配置（.env 已在 .gitignore 中排除）
+    env_file: ./channel-monitor/.env
+    volumes:
+      # SQLite 数据库持久化
+      - channel-monitor-data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+    depends_on:
+      new-api:
+        condition: service_healthy
+    networks:
+      - new-api-network
+
+# 如果单独运行此文件，需要定义网络；若合并到根目录 docker-compose.yml，可删除下方 networks
+networks:
+  new-api-network:
+    driver: bridge
+
+volumes:
+  channel-monitor-data:
