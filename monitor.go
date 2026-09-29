@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 )
@@ -27,6 +28,13 @@ func NewMonitor(cfg Config, client *APIClient, store *Storage, alert *FeishuAler
 
 // RunOnce 执行一轮检测：拉取所有启用渠道，测试每个模型。
 func (m *Monitor) RunOnce(ctx context.Context, now time.Time) error {
+	// 每轮检测开始前，按配置清理超过保留期的旧日志
+	if deleted, err := m.Store.CleanupOldLogs(ctx, m.Config.LogRetentionDays, now); err != nil {
+		log.Printf("[清理错误] %v\n", err)
+	} else if deleted > 0 {
+		log.Printf("[清理] 已删除 %d 条 %d 天前的旧日志\n", deleted, m.Config.LogRetentionDays)
+	}
+
 	channels, err := m.Client.ListChannels(ctx)
 	if err != nil {
 		return fmt.Errorf("list channels: %w", err)
@@ -34,21 +42,21 @@ func (m *Monitor) RunOnce(ctx context.Context, now time.Time) error {
 
 	enabledChannels := filterEnabledChannels(channels)
 	if len(enabledChannels) == 0 {
-		fmt.Println("[跳过] 无启用渠道")
+		log.Println("[跳过] 无启用渠道")
 		return nil
 	}
 
-	fmt.Printf("[开始] 共 %d 个启用渠道\n", len(enabledChannels))
+	log.Printf("[开始] 共 %d 个启用渠道\n", len(enabledChannels))
 	for _, ch := range enabledChannels {
 		if err := ctx.Err(); err != nil {
-			fmt.Println("[取消] 收到上下文取消信号")
+			log.Println("[取消] 收到上下文取消信号")
 			return err
 		}
 		if err := m.testChannel(ctx, ch, now); err != nil {
-			fmt.Printf("[错误] 渠道 %s (ID=%d) 测试失败: %v\n", ch.Name, ch.ID, err)
+			log.Printf("[错误] 渠道 %s (ID=%d) 测试失败: %v\n", ch.Name, ch.ID, err)
 		}
 	}
-	fmt.Println("[完成] 全部测试完成")
+	log.Println("[完成] 全部测试完成")
 	return nil
 }
 
@@ -66,14 +74,14 @@ func filterEnabledChannels(channels []Channel) []Channel {
 
 // testChannel 测试单个渠道的全部模型。
 func (m *Monitor) testChannel(ctx context.Context, ch Channel, now time.Time) error {
-	fmt.Printf("\n[开始] 渠道 %s (ID=%d)\n", ch.Name, ch.ID)
+	log.Printf("\n[开始] 渠道 %s (ID=%d)\n", ch.Name, ch.ID)
 	models := splitModels(ch.Models)
 	if len(models) == 0 {
-		fmt.Printf("[跳过] 渠道 %s 无模型\n", ch.Name)
+		log.Printf("[跳过] 渠道 %s 无模型\n", ch.Name)
 		return nil
 	}
 
-	fmt.Printf("[信息] 渠道 %s 共 %d 个模型\n", ch.Name, len(models))
+	log.Printf("[信息] 渠道 %s 共 %d 个模型\n", ch.Name, len(models))
 
 	failedModels := make([]FailedModel, 0, len(models))
 	failedLogIDs := make(map[int]FailedModel)
@@ -82,32 +90,32 @@ func (m *Monitor) testChannel(ctx context.Context, ch Channel, now time.Time) er
 
 	for _, model := range models {
 		if err := ctx.Err(); err != nil {
-			fmt.Printf("[取消] 模型 %s 测试中断\n", model)
+			log.Printf("[取消] 模型 %s 测试中断\n", model)
 			return err
 		}
-		fmt.Printf("[测试] %s...\n", model)
+		log.Printf("[测试] %s...\n", model)
 		result := m.testModelWithRetry(ctx, ch.ID, model)
 
 		logNow := time.Now()
 		logID, err := m.Store.InsertLog(ctx, ch.ID, ch.Name, model, result, logNow)
 		if err != nil {
-			fmt.Printf("  [落库失败] %s: %v\n", model, err)
+			log.Printf("  [落库失败] %s: %v\n", model, err)
 		}
 
 		if result.Success {
 			successCount++
 			totalLatency += result.LatencyMs
-			fmt.Printf("  [成功] %dms\n", result.LatencyMs)
+			log.Printf("  [成功] %dms\n", result.LatencyMs)
 			continue
 		}
 
 		// 视频模型不支持测试、未配置价格等预期内错误，只记录不告警
 		if isSkippableError(result.ErrorCode, result.ErrorMsg) {
-			fmt.Printf("  [跳过] %s: [%s] %s\n", model, result.ErrorCode, result.ErrorMsg)
+			log.Printf("  [跳过] %s: [%s] %s\n", model, result.ErrorCode, result.ErrorMsg)
 			continue
 		}
 
-		fmt.Printf("  [失败] [%s] %s\n", result.ErrorCode, result.ErrorMsg)
+		log.Printf("  [失败] [%s] %s\n", result.ErrorCode, result.ErrorMsg)
 		fm := FailedModel{
 			Model:     model,
 			ErrorCode: result.ErrorCode,
@@ -123,11 +131,11 @@ func (m *Monitor) testChannel(ctx context.Context, ch Channel, now time.Time) er
 	if successCount > 0 {
 		avgLatency = totalLatency / successCount
 	}
-	fmt.Printf("[完成] 渠道 %s: %d/%d 成功, %d 跳过, 平均延迟 %dms\n", ch.Name, successCount, len(models), len(models)-successCount-len(failedModels), avgLatency)
+	log.Printf("[完成] 渠道 %s: %d/%d 成功, %d 跳过, 平均延迟 %dms\n", ch.Name, successCount, len(models), len(models)-successCount-len(failedModels), avgLatency)
 
 	if len(failedModels) > 0 {
 		if err := m.alertIfNeeded(ctx, ch, failedModels, failedLogIDs, now); err != nil {
-			fmt.Printf("[告警错误] %s: %v\n", ch.Name, err)
+			log.Printf("[告警错误] %s: %v\n", ch.Name, err)
 		}
 	}
 
@@ -181,7 +189,7 @@ func (m *Monitor) testModelWithRetry(ctx context.Context, channelID int, model s
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
-			fmt.Printf("  [重试 %d/%d] %s，等待 %ds...\n", attempt, m.Config.RetryTimes, model, m.Config.RetryDelaySeconds)
+			log.Printf("  [重试 %d/%d] %s，等待 %ds...\n", attempt, m.Config.RetryTimes, model, m.Config.RetryDelaySeconds)
 			if err := sleepWithContext(ctx, time.Duration(m.Config.RetryDelaySeconds)*time.Second); err != nil {
 				return TestResult{
 					Success:   false,
@@ -195,7 +203,7 @@ func (m *Monitor) testModelWithRetry(ctx context.Context, channelID int, model s
 		if lastResult.Success {
 			return lastResult
 		}
-		fmt.Printf("  [失败 %d/%d] %s: [%s] %s\n", attempt+1, maxAttempts, model, lastResult.ErrorCode, lastResult.ErrorMsg)
+		log.Printf("  [失败 %d/%d] %s: [%s] %s\n", attempt+1, maxAttempts, model, lastResult.ErrorCode, lastResult.ErrorMsg)
 
 		// 预期内错误（视频模型不支持测试、模型未配置价格）是确定性失败，
 		// 重试不可能改变结果，直接返回避免空等 RetryDelaySeconds * RetryTimes。
@@ -231,7 +239,7 @@ func (m *Monitor) alertIfNeeded(ctx context.Context, ch Channel, failedModels []
 	for _, fm := range failedModels {
 		should, err := m.Store.ShouldAlert(ctx, ch.ID, fm.Model, m.Config.AlertDebounceMinutes, now)
 		if err != nil {
-			fmt.Printf("  [告警判断失败] %s/%s: %v\n", ch.Name, fm.Model, err)
+			log.Printf("  [告警判断失败] %s/%s: %v\n", ch.Name, fm.Model, err)
 			continue
 		}
 		if should {
@@ -243,7 +251,7 @@ func (m *Monitor) alertIfNeeded(ctx context.Context, ch Channel, failedModels []
 				}
 			}
 		} else {
-			fmt.Printf("  [告警防抖] %s/%s 跳过\n", ch.Name, fm.Model)
+			log.Printf("  [告警防抖] %s/%s 跳过\n", ch.Name, fm.Model)
 		}
 	}
 
@@ -254,7 +262,7 @@ func (m *Monitor) alertIfNeeded(ctx context.Context, ch Channel, failedModels []
 	if err := m.Alert.Send(ch.Name, needAlertModels); err != nil {
 		return err
 	}
-	fmt.Printf("[飞书] 告警已发送: %s - %d 个模型异常\n", ch.Name, len(needAlertModels))
+	log.Printf("[飞书] 告警已发送: %s - %d 个模型异常\n", ch.Name, len(needAlertModels))
 
 	for _, logID := range needAlertLogIDs {
 		_ = m.Store.MarkAlertedByID(ctx, logID)

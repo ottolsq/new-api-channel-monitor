@@ -115,6 +115,22 @@ func (s *Storage) MarkAlertedByID(ctx context.Context, logID int64) error {
 	return nil
 }
 
+// CleanupOldLogs 删除早于保留期 cutoff 的检测记录，返回删除条数。
+// retentionDays <= 0 表示永久保留，不清理。
+func (s *Storage) CleanupOldLogs(ctx context.Context, retentionDays int, now time.Time) (int64, error) {
+	if retentionDays <= 0 {
+		return 0, nil
+	}
+	cutoff := now.AddDate(0, 0, -retentionDays).Unix()
+	res, err := s.db.ExecContext(ctx, `
+        DELETE FROM test_logs WHERE created_at < ?
+    `, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("cleanup old logs: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // AvailabilitySummary 按渠道+模型聚合可用率。
 type AvailabilitySummary struct {
 	ChannelID           int64   `json:"channel_id"`
