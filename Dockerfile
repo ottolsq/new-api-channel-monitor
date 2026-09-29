@@ -18,6 +18,5 @@ RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=builder /build/channel-monitor /app/channel-monitor
 
-# 默认通过 volume 挂载 config.json 和持久化 monitor.db
+# 默认从工作目录读取 .env 配置（可被 docker -e / --env-file 覆盖），数据卷持久化 monitor.db
 ENTRYPOINT ["/app/channel-monitor"]
-CMD ["-config", "/app/config/config.json"]

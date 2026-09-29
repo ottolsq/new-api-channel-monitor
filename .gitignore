@@ -18,10 +18,6 @@
 *.db-wal
 *.db-shm
 
-# 配置敏感文件（保留 .example 作为模板）
-.env
-config.json
-config.local.json
 *.secret
 
 # 日志
@@ -36,3 +32,9 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# 部署配置（含敏感信息，不进仓库）
+.env
+
+# 本地编译产物
+/channel-monitor

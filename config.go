@@ -1,33 +1,33 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // Config 是监控工具的全局配置。
-// 加载顺序：示例 config.json.example（兜底）→ --config 指定文件 → 环境变量覆盖。
+// 加载顺序：代码内默认值 → 工作目录 .env（KEY=VALUE）→ 进程环境变量覆盖。
+// 真正的环境变量（export / docker -e / systemd Environment）优先级最高，不会被 .env 覆盖。
 type Config struct {
-	APIBaseURL           string `json:"api_base_url"`
-	DashboardUsername    string `json:"dashboard_username"`
-	DashboardPassword    string `json:"dashboard_password"`
-	FeishuWebhookURL     string `json:"feishu_webhook_url"`
-	DBPath               string `json:"db_path"`
-	IntervalMinutes      int    `json:"interval_minutes"`
-	RetryTimes           int    `json:"retry_times"`
-	RetryDelaySeconds    int    `json:"retry_delay_seconds"`
-	TimeoutSeconds       int    `json:"timeout_seconds"`
-	AlertDebounceMinutes int    `json:"alert_debounce_minutes"`
+	APIBaseURL           string
+	DashboardUsername    string
+	DashboardPassword    string
+	FeishuWebhookURL     string
+	DBPath               string
+	IntervalMinutes      int
+	RetryTimes           int
+	RetryDelaySeconds    int
+	TimeoutSeconds       int
+	AlertDebounceMinutes int
+	LogRetentionDays     int
 }
 
-const (
-	defaultExampleConfigPath = "config.json.example"
-)
+const defaultEnvPath = ".env"
 
 // defaultConfig 返回默认配置。
 func defaultConfig() Config {
@@ -51,22 +51,12 @@ func defaultDBPath() string {
 	return filepath.Join(filepath.Dir(exe), "monitor.db")
 }
 
-// loadConfig 加载配置：尝试 path（--config 指定），文件不存在则回退到 config.json.example；
-// 然后用环境变量覆盖任何非空字段；最后校验必填项。
-// 优先以"绝不报暴露的密码"为目标：env > 显式文件 > 默认值。
-func loadConfig(path string) (Config, error) {
+// loadConfig 加载配置：先注入工作目录下的 .env（不覆盖已有环境变量），
+// 再用环境变量覆盖默认值，最后校验必填项。
+func loadConfig() (Config, error) {
+	loadDotEnv(defaultEnvPath)
+
 	cfg := defaultConfig()
-
-	usedPath, data, err := readConfigFile(path)
-	if err != nil {
-		return cfg, err
-	}
-	if usedPath != "" && len(data) > 0 {
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			return cfg, fmt.Errorf("parse config (%s): %w", usedPath, err)
-		}
-	}
-
 	applyEnvOverrides(&cfg)
 
 	if err := validateConfig(&cfg); err != nil {
@@ -75,31 +65,36 @@ func loadConfig(path string) (Config, error) {
 	return cfg, nil
 }
 
-// readConfigFile 读取配置文件：先用 path，文件不存在则回退到 defaultExampleConfigPath。
-// 返回 (实际使用路径, 内容, 错误)。
-// 当 path 和 example 都缺失时返回空内容、不报错——交给 validateConfig 报错。
-func readConfigFile(path string) (string, []byte, error) {
-	if path == "" {
-		path = defaultExampleConfigPath
+// loadDotEnv 读取 KEY=VALUE 格式的 .env 文件，将其中「尚未在进程环境中设置」的变量注入。
+// 已通过 export / docker -e / systemd Environment 设置的环境变量优先，不会被 .env 覆盖。
+// 文件不存在时静默跳过；不引第三方依赖，仅处理 # 注释、可选引号与首尾空白。
+func loadDotEnv(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
 	}
-
-	if data, err := os.ReadFile(path); err == nil {
-		return path, data, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", nil, fmt.Errorf("read config %s: %w", path, err)
-	}
-
-	// 指定文件不存在 -> 回退到 example（如果存在）
-	if _, statErr := os.Stat(defaultExampleConfigPath); statErr == nil {
-		data, err := os.ReadFile(defaultExampleConfigPath)
-		if err != nil {
-			return "", nil, fmt.Errorf("read example config %s: %w", defaultExampleConfigPath, err)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
 		}
-		return defaultExampleConfigPath, data, nil
+		line = strings.TrimPrefix(line, "export ")
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 && (value[0] == '"' && value[len(value)-1] == '"' || value[0] == '\'' && value[len(value)-1] == '\'') {
+			value = value[1 : len(value)-1]
+		}
+		if key == "" {
+			continue
+		}
+		if _, exists := os.LookupEnv(key); !exists {
+			_ = os.Setenv(key, value)
+		}
 	}
-
-	// 都没有 -> 使用默认值，校验时会捕获必填项缺失
-	return "", nil, nil
 }
 
 // applyEnvOverrides 用非空环境变量覆盖 cfg 字段。
@@ -135,6 +130,9 @@ func applyEnvOverrides(cfg *Config) {
 	if v, ok := parseIntEnv("ALERT_DEBOUNCE_MINUTES"); ok {
 		cfg.AlertDebounceMinutes = v
 	}
+	if v, ok := parseIntEnv("LOG_RETENTION_DAYS"); ok {
+		cfg.LogRetentionDays = v
+	}
 }
 
 // parseIntEnv 读取命名环境变量并解析为 int。
@@ -154,7 +152,7 @@ func parseIntEnv(name string) (int, bool) {
 // validateConfig 校验并规范化配置。
 func validateConfig(cfg *Config) error {
 	if cfg.APIBaseURL == "" {
-		return errors.New("api_base_url is required (set via config file or API_BASE_URL env)")
+		return errors.New("api_base_url is required (set via .env or API_BASE_URL env)")
 	}
 	u, err := url.Parse(cfg.APIBaseURL)
 	if err != nil {
@@ -165,10 +163,10 @@ func validateConfig(cfg *Config) error {
 	}
 
 	if cfg.DashboardUsername == "" {
-		return errors.New("dashboard_username is required (set via config file or DASHBOARD_USERNAME env)")
+		return errors.New("dashboard_username is required (set via .env or DASHBOARD_USERNAME env)")
 	}
 	if cfg.DashboardPassword == "" {
-		return errors.New("dashboard_password is required (set via config file or DASHBOARD_PASSWORD env)")
+		return errors.New("dashboard_password is required (set via .env or DASHBOARD_PASSWORD env)")
 	}
 	if cfg.IntervalMinutes <= 0 {
 		cfg.IntervalMinutes = 30
@@ -184,6 +182,9 @@ func validateConfig(cfg *Config) error {
 	}
 	if cfg.AlertDebounceMinutes < 0 {
 		cfg.AlertDebounceMinutes = 0
+	}
+	if cfg.LogRetentionDays < 0 {
+		cfg.LogRetentionDays = 0
 	}
 	return nil
 }
