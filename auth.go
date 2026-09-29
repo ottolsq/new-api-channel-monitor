@@ -42,36 +42,17 @@ func NewAuthManager(baseURL, username, password string) (*AuthManager, error) {
 	}, nil
 }
 
-// GetAccessToken 返回可用于调用 /api/* 管理接口的 dashboard access token。
-// 如果缓存的 token 仍有效，则直接返回；否则重新登录获取。
+// GetAccessToken 调用 /api/user/login 拿一个新 token。
+// 不缓存 token：父进程调度器每轮 fork 一个新子进程，子进程登录一次后立即退出，
+// 进程结束 session 立即在 new-api 端进入可回收状态，避免长期会话堆积触发 AUTH_SESSION_LIMIT。
 func (a *AuthManager) GetAccessToken(ctx context.Context) (string, error) {
-	// 先尝试读取缓存，token 剩余有效期大于 1 分钟认为可用
-	a.mu.RLock()
-	token := a.accessToken
-	expiresAt := a.expiresAt
-	a.mu.RUnlock()
+	return a.loginOnce(ctx)
+}
 
-	if token != "" && time.Until(expiresAt) > time.Minute {
-		return token, nil
-	}
-
-	// 缓存无效，重新登录
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	// 双重检查，避免多个 goroutine 同时登录
-	if a.accessToken != "" && time.Until(a.expiresAt) > time.Minute {
-		return a.accessToken, nil
-	}
-
-	token, expiresAt, err := a.login(ctx)
-	if err != nil {
-		return "", err
-	}
-
-	a.accessToken = token
-	a.expiresAt = expiresAt
-	return token, nil
+// loginOnce 单次登录，调用方拿到 token 后直接使用，进程退出后 token 随之失效。
+func (a *AuthManager) loginOnce(ctx context.Context) (string, error) {
+	token, _, err := a.login(ctx)
+	return token, err
 }
 
 // login 调用 /api/user/login 获取 dashboard access token 及其过期时间。

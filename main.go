@@ -4,103 +4,96 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 )
 
-const defaultConfigPath = "config.json"
+const defaultDBPathHint = "monitor.db"
 
 func main() {
+	// `-child` 是父进程调度器传给自己的隐藏标志，不对外暴露；识别到就走单轮子进程模式。
+	for _, a := range os.Args[1:] {
+		if a == childModeFlag {
+			os.Exit(runAsChild())
+		}
+	}
+
 	var (
-		configPath = flag.String("config", defaultConfigPath, "配置文件路径")
 		queryHours = flag.Int("query", 0, "查询最近 N 小时的可用率，然后退出")
 		failures   = flag.Bool("failures", false, "与 -query 配合，显示失败明细")
 		once       = flag.Bool("once", false, "只运行一轮检测，然后退出")
 	)
 	flag.Parse()
 
-	cfg, err := loadConfig(*configPath)
+	cfg, err := loadConfig()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("加载配置失败: %v", err)
 	}
 
 	store, err := NewStorage(cfg.DBPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "初始化数据库失败: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("初始化数据库失败: %v", err)
 	}
 	defer store.Close()
 
 	if *queryHours > 0 {
 		if err := runQuery(store, *queryHours, *failures); err != nil {
-			fmt.Fprintf(os.Stderr, "查询失败: %v\n", err)
-			os.Exit(1)
+			log.Fatalf("查询失败: %v", err)
 		}
 		return
 	}
 
+	if *once {
+		client, alert, err := buildClientAndAlert(cfg)
+		if err != nil {
+			log.Fatalf("%v", err)
+		}
+		monitor := NewMonitor(cfg, client, store, alert)
+		if err := monitor.RunOnce(context.Background(), time.Now()); err != nil {
+			log.Fatalf("运行失败: %v", err)
+		}
+		return
+	}
+
+	// 默认模式：父进程周期性 fork 子进程跑检测，每轮独立进程不缓存 session。
+	interval := time.Duration(cfg.IntervalMinutes) * time.Minute
+	retention := "永久"
+	if cfg.LogRetentionDays > 0 {
+		retention = fmt.Sprintf("%d 天", cfg.LogRetentionDays)
+	}
+	log.Printf("[启动] 父进程调度模式，检测间隔 %s，日志保留 %s\n", interval, retention)
+
+	sup, err := NewSupervisor(interval)
+	if err != nil {
+		log.Fatalf("创建调度器失败: %v", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := sup.Run(ctx); err != nil {
+		log.Fatalf("运行失败: %v", err)
+	}
+}
+
+// buildClientAndAlert 给 -once / 手动调试用，构造 APIClient 与可选的飞书告警。
+func buildClientAndAlert(cfg Config) (*APIClient, *FeishuAlert, error) {
 	auth, err := NewAuthManager(cfg.APIBaseURL, cfg.DashboardUsername, cfg.DashboardPassword)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "创建认证管理器失败: %v\n", err)
-		os.Exit(1)
+		return nil, nil, fmt.Errorf("创建认证管理器失败: %v", err)
 	}
-
 	client, err := NewAPIClient(cfg.APIBaseURL, auth, cfg.TimeoutSeconds)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "创建 API 客户端失败: %v\n", err)
-		os.Exit(1)
+		return nil, nil, fmt.Errorf("创建 API 客户端失败: %v", err)
 	}
-
 	var alert *FeishuAlert
 	if cfg.FeishuWebhookURL != "" {
 		alert = NewFeishuAlert(cfg.FeishuWebhookURL, cfg.TimeoutSeconds)
 	}
-
-	monitor := NewMonitor(cfg, client, store, alert)
-
-	if *once {
-		if err := monitor.RunOnce(context.Background(), time.Now()); err != nil {
-			fmt.Fprintf(os.Stderr, "运行失败: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	interval := time.Duration(cfg.IntervalMinutes) * time.Minute
-	fmt.Printf("[启动] 渠道监控已启动，检测间隔 %s，配置 %s\n", interval, *configPath)
-	if err := runLoop(monitor, interval); err != nil {
-		fmt.Fprintf(os.Stderr, "运行失败: %v\n", err)
-		os.Exit(1)
-	}
-}
-
-// runLoop 按 interval 周期性地执行一轮检测，支持优雅退出。
-func runLoop(monitor *Monitor, interval time.Duration) error {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	// 启动立即执行一轮
-	if err := monitor.RunOnce(ctx, time.Now()); err != nil {
-		fmt.Printf("[运行错误] %v\n", err)
-	}
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			fmt.Println("[退出] 收到终止信号")
-			return nil
-		case now := <-ticker.C:
-			if err := monitor.RunOnce(ctx, now); err != nil {
-				fmt.Printf("[运行错误] %v\n", err)
-			}
-		}
-	}
+	return client, alert, nil
 }
 
 // runQuery 查询最近 hours 小时的可用率，可选展示失败明细。
